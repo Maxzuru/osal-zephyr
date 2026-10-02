@@ -1,0 +1,55 @@
+# OSAL functional tests (src/tests, src/unit-tests) on Zephyr.
+#
+# Each scenario builds one OSAL test. Tags name the OSAL area it validates,
+# so a single area can be run with e.g. `west twister -T zephyr/tests --tag binsem`.
+# Add scenarios here as areas are ported.
+
+common:
+  platform_allow:
+    - native_sim
+    - qemu_x86
+  integration_platforms:
+    - native_sim
+  tags: osal
+  timeout: 120
+  harness: console
+  harness_config:
+    type: one_line
+    regex:
+      - "Application exit status: SUCCESS"
+    record:
+      regex:
+        - "\\[ *(?P<type>FAIL|TSF|TTF|ABORT)\\] (?P<case>\\S+) (?P<message>.*)"
+
+tests:
+  osal.functional.bin_sem:
+    tags: binsem
+    extra_args: OSAL_TEST=tests/bin-sem-test
+  osal.functional.bin_sem_timeout:
+    tags: binsem
+    extra_args: OSAL_TEST=tests/bin-sem-timeout-test
+  osal.functional.count_sem:
+    tags: countsem
+    extra_args: OSAL_TEST=tests/count-sem-test
+  osal.functional.count_sem_timeout:
+    tags: countsem
+    extra_args: OSAL_TEST=tests/count-sem-timeout-test
+  osal.functional.mutex:
+    tags: mutex
+    extra_args: OSAL_TEST=tests/mutex-test
+  osal.functional.condvar:
+    tags: condvar
+    extra_args: OSAL_TEST=tests/condvar-test
+  # Needs queues (OS_QueueCreate); enable once queues are ported.
+  # osal.functional.idmap_api:
+  #   tags: idmap
+  #   extra_args: OSAL_TEST=tests/idmap-api-test
+  osal.functional.time_base_api:
+    tags: timebase
+    extra_args: OSAL_TEST=tests/time-base-api-test
+  osal.functional.timer:
+    tags: timer
+    extra_args: OSAL_TEST=tests/timer-test
+  osal.functional.timer_add_api:
+    tags: timer
+    extra_args: OSAL_TEST=tests/timer-add-api-test
