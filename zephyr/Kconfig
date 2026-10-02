@@ -6,6 +6,7 @@
 config CFS_OSAL
 	bool "Enable cFS OSAL Support"
 	depends on MULTITHREADING
+	depends on SYS_CLOCK_EXISTS
 	depends on PREEMPT_ENABLED
 	depends on NUM_METAIRQ_PRIORITIES <= NUM_COOP_PRIORITIES
 	select PRINTK

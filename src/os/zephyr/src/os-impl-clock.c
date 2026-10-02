@@ -11,7 +11,6 @@
 #include "os-shared-clock.h"
 #include "os-impl-tasks.h"
 
-#if defined(CONFIG_SYS_CLOCK_EXISTS)
 K_MUTEX_DEFINE(OS_clock_lock);
 
 /* Until explicitly set, local time has the same boot epoch as uptime. Keep
@@ -124,25 +123,3 @@ int32 OS_SetLocalTime_Impl(const OS_time_t *time_struct)
 
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
-#else
-int32 OS_GetMonotonicTime_Impl(OS_time_t *time_struct)
-{
-    ARG_UNUSED(time_struct);
-
-    return OS_ERR_NOT_IMPLEMENTED;
-}
-
-int32 OS_GetLocalTime_Impl(OS_time_t *time_struct)
-{
-    ARG_UNUSED(time_struct);
-
-    return OS_ERR_NOT_IMPLEMENTED;
-}
-
-int32 OS_SetLocalTime_Impl(const OS_time_t *time_struct)
-{
-    ARG_UNUSED(time_struct);
-
-    return OS_ERR_NOT_IMPLEMENTED;
-}
-#endif
