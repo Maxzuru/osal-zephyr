@@ -4,10 +4,8 @@
  */
 
 #include <errno.h>
-#include <limits.h>
 #include <stdint.h>
 #include <zephyr/kernel.h>
-#include <zephyr/kernel/obj_core.h>
 #include <zephyr/sys/clock.h>
 
 #include "os-impl-countsem.h"
@@ -17,10 +15,12 @@
 
 OS_impl_countsem_internal_record_t OS_impl_count_sem_table[OS_MAX_COUNT_SEMAPHORES];
 
-/* NONE tokens do not pin a shared slot. The permanent mutex protects ID
- * validation and admission. An admitted native Take retains a reservation
- * until its final access, so Delete cannot reset/reuse a late kernel waiter.
- * All operations are thread-context APIs, including Give. */
+/* NONE tokens do not pin a shared slot. A token can outlive deletion and
+ * slot reuse before entering this provider. Keep each slot's kernel objects
+ * for the lifetime of the port, and validate the full ID under its mutex
+ * before accessing state, including after every wait. No reference or
+ * waiter count is retained across a kernel wait. All operations are
+ * thread-context APIs, including Give. */
 static bool OS_Zephyr_CountSemMatches(const OS_impl_countsem_internal_record_t *impl,
                                     const OS_object_token_t *token)
 {
@@ -41,9 +41,12 @@ int32 OS_CountSemCreate_Impl(const OS_object_token_t *token, uint32 sem_initial_
     {
         return OS_Zephyr_TaskLeaveResult(OS_INVALID_SEM_VALUE);
     }
+
+    /* Shared allocation serializes the first initialization of a slot.
+     * Later creations must not reinitialize locks that old calls may use. */
     if (!impl->initialized)
     {
-        if (k_mutex_init(&impl->lock) != 0)
+        if (k_mutex_init(&impl->lock) != 0 || k_condvar_init(&impl->changed) != 0)
         {
             return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
         }
@@ -53,14 +56,14 @@ int32 OS_CountSemCreate_Impl(const OS_object_token_t *token, uint32 sem_initial_
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    if (impl->active || atomic_get(&impl->users) != 0 ||
-        k_sem_init(&impl->sem, sem_initial_value, INT32_MAX) != 0)
+    if (impl->active)
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    impl->object_id = OS_ObjectIdFromToken(token);
-    impl->active    = true;
+    impl->object_id     = OS_ObjectIdFromToken(token);
+    impl->current_value = sem_initial_value;
+    impl->active        = true;
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
@@ -72,7 +75,8 @@ int32 OS_CountSemDelete_Impl(const OS_object_token_t *token)
     OS_Zephyr_TaskEnter();
 
     /* The shared EXCLUSIVE transaction reserves the public ID. Never wait
-     * for a giver or an admitted Take to finish; failure restores that ID. */
+     * for a giver; failure restores that ID. A sleeping waiter has released
+     * this lock and may be invalidated safely. */
     if (k_mutex_lock(&impl->lock, K_NO_WAIT) != 0)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
@@ -82,19 +86,9 @@ int32 OS_CountSemDelete_Impl(const OS_object_token_t *token)
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERR_INVALID_ID);
     }
-    if (atomic_get(&impl->users) != 0)
-    {
-        k_mutex_unlock(&impl->lock);
-        return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
-    }
 
-    /* No native operation remains or can enter for this ID. Unlink before
-     * Create reinitializes the semaphore, avoiding duplicate registry nodes.
-     * The state mutex remains initialized across every logical generation. */
-#ifdef CONFIG_OBJ_CORE_SEM
-    k_obj_core_unlink(K_OBJ_CORE(&impl->sem));
-#endif
     impl->active = false;
+    k_condvar_broadcast(&impl->changed);
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
@@ -106,8 +100,6 @@ int32 OS_CountSemGive_Impl(const OS_object_token_t *token)
 
     OS_Zephyr_TaskEnter();
 
-    /* Serialize givers so the overflow check cannot race another increment.
-     * Concurrent takers can only decrease the count. */
     if (k_mutex_lock(&impl->lock, K_FOREVER) != 0)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
@@ -116,22 +108,32 @@ int32 OS_CountSemGive_Impl(const OS_object_token_t *token)
     {
         status = OS_ERR_INVALID_ID;
     }
-    else if (k_sem_count_get(&impl->sem) == INT32_MAX)
+    else if (impl->current_value == INT32_MAX)
     {
         status = OS_SEM_FAILURE;
     }
     else
     {
-        k_sem_give(&impl->sem);
+        ++impl->current_value;
+        /* Delete broadcasts before reuse, and old waiters cannot requeue
+         * after their ID check fails. This signal therefore serves the
+         * current generation only. */
+        k_condvar_signal(&impl->changed);
         status = OS_SUCCESS;
     }
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(status);
 }
 
+/*
+ * Shared Take/TimedWait helper. "deadline" is computed by the caller via
+ * sys_timepoint_calc() so that a spurious wakeup re-derives the remaining
+ * budget instead of restarting a fresh K_MSEC() window each iteration.
+ */
 static int32 OS_Zephyr_CountSemTake(const OS_object_token_t *token, k_timepoint_t deadline)
 {
     OS_impl_countsem_internal_record_t *impl = OS_OBJECT_TABLE_GET(OS_impl_count_sem_table, *token);
+    int32                             return_code;
     int                               status;
 
     status = k_mutex_lock(&impl->lock, sys_timepoint_timeout(deadline));
@@ -144,26 +146,33 @@ static int32 OS_Zephyr_CountSemTake(const OS_object_token_t *token, k_timepoint_
         k_mutex_unlock(&impl->lock);
         return OS_ERR_INVALID_ID;
     }
-    if (atomic_get(&impl->users) == LONG_MAX)
+
+    return_code = OS_SUCCESS;
+    while (impl->current_value == 0)
     {
-        k_mutex_unlock(&impl->lock);
-        return OS_SEM_FAILURE;
+        status = k_condvar_wait(&impl->changed, &impl->lock, sys_timepoint_timeout(deadline));
+        /* The permanent lock is reacquired even when the old object has
+         * been deleted and this slot already belongs to another ID. */
+        if (!OS_Zephyr_CountSemMatches(impl, token))
+        {
+            return_code = OS_ERR_INVALID_ID;
+            break;
+        }
+        if (status != 0)
+        {
+            return_code = status == -EAGAIN ? OS_SEM_TIMEOUT : OS_SEM_FAILURE;
+            break;
+        }
     }
-    atomic_inc(&impl->users);
+
+    if (return_code == OS_SUCCESS)
+    {
+        --impl->current_value;
+    }
+
     k_mutex_unlock(&impl->lock);
 
-    status = k_sem_take(&impl->sem, sys_timepoint_timeout(deadline));
-    /* This is the last access to the slot. No cleanup mutex acquisition may
-     * extend a finite wait. Delete can reuse the semaphore after this atomic
-     * release because the real native operation has completely returned.
-     * Forced termination before release would strand a reservation; that
-     * requires the still-deferred ownership-aware task retirement protocol. */
-    atomic_dec(&impl->users);
-    if (status == 0)
-    {
-        return OS_SUCCESS;
-    }
-    return status == -EAGAIN || status == -EBUSY ? OS_SEM_TIMEOUT : OS_SEM_FAILURE;
+    return return_code;
 }
 
 int32 OS_CountSemTake_Impl(const OS_object_token_t *token)
@@ -206,7 +215,7 @@ int32 OS_CountSemGetInfo_Impl(const OS_object_token_t *token, OS_count_sem_prop_
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERR_INVALID_ID);
     }
-    count_prop->value = (int32)k_sem_count_get(&impl->sem);
+    count_prop->value = (int32)impl->current_value;
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
