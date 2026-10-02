@@ -25,6 +25,24 @@ set(ZEPHYR_IMPL_SRCLIST
     ../portable/os-impl-console-bsp.c
 )
 
+# Areas not yet ported to Zephyr. Every call reports OS_ERR_NOT_IMPLEMENTED
+# so the full OSAL links; replace each entry when its area is implemented.
+list(APPEND ZEPHYR_IMPL_SRCLIST
+    src/os-impl-no-dirs.c
+    src/os-impl-no-files.c
+    src/os-impl-no-filesys.c
+    src/os-impl-no-heap.c
+    src/os-impl-no-queues.c
+    ../portable/os-impl-no-loader.c
+    ../portable/os-impl-no-network-gethostid.c
+    ../portable/os-impl-no-network-gethostname.c
+    ../portable/os-impl-no-rwlock.c
+    ../portable/os-impl-no-select.c
+    ../portable/os-impl-no-shell.c
+    ../portable/os-impl-no-sockets.c
+    ../portable/os-impl-no-symtab.c
+)
+
 # Defines an OBJECT target named "osal_zephyr_impl" with selected source files
 add_library(osal_zephyr_impl OBJECT
     ${ZEPHYR_BASE_SRCLIST}
