@@ -23,6 +23,17 @@ static bool OS_Zephyr_CondVarMatches(const OS_impl_condvar_internal_record_t *im
     return impl->active && OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token));
 }
 
+/* Called by OS_TaskDelete after aborting a waiter, with the application
+ * mutex held, so state_lock follows the documented lock order. */
+static void OS_Zephyr_CondVarReleaseWaiter(void *arg)
+{
+    OS_impl_condvar_internal_record_t *impl = arg;
+
+    k_mutex_lock(&impl->state_lock, K_FOREVER);
+    --impl->waiters;
+    k_mutex_unlock(&impl->state_lock);
+}
+
 int32 OS_CondVarCreate_Impl(const OS_object_token_t *token, uint32 options)
 {
     OS_impl_condvar_internal_record_t *impl = OS_OBJECT_TABLE_GET(OS_impl_condvar_table, *token);
@@ -258,6 +269,9 @@ int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
         ++impl->waiters;
         impl->depth = 0;
         status      = OS_SUCCESS;
+        /* Abortable once the native Wait releases the application mutex.
+         * OS_TaskDelete then releases this waiter reservation instead. */
+        OS_Zephyr_TaskWaitBegin(&impl->lock, OS_Zephyr_CondVarReleaseWaiter, impl);
     }
     k_mutex_unlock(&impl->state_lock);
     k_mutex_unlock(&impl->lock); /* Drop only the probe before native Wait. */
@@ -267,11 +281,10 @@ int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
     }
 
     status = k_condvar_wait(&impl->changed, &impl->lock, K_FOREVER);
+    OS_Zephyr_TaskWaitEnd();
 
     /* Native Wait reacquires the application mutex even on error. The
-     * waiter reservation prevents deletion throughout sleep and reacquire.
-     * Forced thread termination cannot release this reservation and remains
-     * unsupported until ownership-aware task retirement is implemented. */
+     * waiter reservation prevents deletion throughout sleep and reacquire. */
     k_mutex_lock(&impl->state_lock, K_FOREVER);
     impl->depth = 1;
     --impl->waiters;

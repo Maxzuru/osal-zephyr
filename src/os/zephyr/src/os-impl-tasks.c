@@ -5,10 +5,15 @@
 
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/clock.h>
 
 #include "os-impl-tasks.h"
 #include "os-shared-idmap.h"
 #include "os-shared-task.h"
+
+/* Upper bound for OS_TaskDelete to wait for a target inside a provider
+ * operation to block in an abortable wait or leave the operation. */
+#define OS_ZEPHYR_TASK_DELETE_WAIT_MS 100
 
 typedef enum
 {
@@ -31,6 +36,10 @@ typedef struct
     osal_id_t               object_id;
     OS_Zephyr_task_state_t   state;
     uint32                  internal_depth;
+    /* Abortable wait record, see OS_Zephyr_TaskWaitBegin(). */
+    struct k_mutex         *wait_lock;
+    void                  (*wait_release)(void *arg);
+    void                   *wait_arg;
 } OS_impl_task_internal_record_t;
 
 typedef struct
@@ -103,6 +112,38 @@ void OS_Zephyr_TaskLeave(void)
     k_spin_unlock(&OS_task_lock, key);
 }
 
+void OS_Zephyr_TaskWaitBegin(struct k_mutex *lock, void (*release)(void *arg), void *arg)
+{
+    OS_impl_task_internal_record_t *impl;
+    k_spinlock_key_t                key;
+
+    key  = k_spin_lock(&OS_task_lock);
+    impl = OS_Zephyr_TaskFind(k_current_get());
+    if (impl != NULL && impl->internal_depth == 1)
+    {
+        impl->wait_lock    = lock;
+        impl->wait_release = release;
+        impl->wait_arg     = arg;
+    }
+    k_spin_unlock(&OS_task_lock, key);
+}
+
+void OS_Zephyr_TaskWaitEnd(void)
+{
+    OS_impl_task_internal_record_t *impl;
+    k_spinlock_key_t                key;
+
+    key  = k_spin_lock(&OS_task_lock);
+    impl = OS_Zephyr_TaskFind(k_current_get());
+    if (impl != NULL)
+    {
+        impl->wait_lock    = NULL;
+        impl->wait_release = NULL;
+        impl->wait_arg     = NULL;
+    }
+    k_spin_unlock(&OS_task_lock, key);
+}
+
 /* Join is the safety condition: stack-free's live-thread check does not
  * recognize the reserved MPU guard prefix on all Zephyr architectures. */
 static void OS_Zephyr_TaskReclaim(OS_impl_task_internal_record_t *impl)
@@ -130,6 +171,9 @@ static void OS_Zephyr_TaskReclaim(OS_impl_task_internal_record_t *impl)
     impl->stack_owned       = false;
     impl->object_id        = OS_OBJECT_ID_UNDEFINED;
     impl->internal_depth   = 0;
+    impl->wait_lock        = NULL;
+    impl->wait_release     = NULL;
+    impl->wait_arg         = NULL;
     impl->state            = OS_ZEPHYR_TASK_FREE;
     k_spin_unlock(&OS_task_lock, key);
     k_sem_give(&impl->reusable);
@@ -362,29 +406,99 @@ int32 OS_TaskCreate_Impl(const OS_object_token_t *token, uint32 flags)
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
 
-int32 OS_TaskDelete_Impl(const OS_object_token_t *token)
+/* Abort the target if it holds no provider resource. Returns
+ * OS_ERR_OBJECT_IN_USE while it is inside a provider operation outside an
+ * abortable wait, and OS_ERROR if this generation cannot be deleted. */
+static int32 OS_Zephyr_TaskTryAbort(OS_impl_task_internal_record_t *impl, const OS_object_token_t *token,
+                                    k_timepoint_t deadline)
 {
-    OS_impl_task_internal_record_t *impl = OS_OBJECT_TABLE_GET(OS_impl_task_table, *token);
-    k_spinlock_key_t                key;
-    k_tid_t                         thread;
+    struct k_mutex  *lock;
+    k_spinlock_key_t key;
+    k_tid_t          thread;
+    void           (*release)(void *arg);
+    void            *arg;
 
-    OS_Zephyr_TaskEnter();
     key = k_spin_lock(&OS_task_lock);
     if (impl->state != OS_ZEPHYR_TASK_ACTIVE || impl->thread == k_current_get() ||
-        !OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token)) || impl->internal_depth != 0)
+        !OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token)))
     {
         k_spin_unlock(&OS_task_lock, key);
-        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
+        return OS_ERROR;
+    }
+    if (impl->internal_depth == 0)
+    {
+        impl->state = OS_ZEPHYR_TASK_CLOSING;
+        thread      = impl->thread;
+        k_spin_unlock(&OS_task_lock, key);
+        k_thread_abort(thread);
+        return OS_SUCCESS;
+    }
+    lock = impl->wait_lock;
+    k_spin_unlock(&OS_task_lock, key);
+
+    /* Bound the lock wait: an application may hold it for any length of
+     * time. Queueing here lets a higher-priority deleter win the lock before
+     * a native hand-off can make the target its owner. */
+    if (lock == NULL ||
+        k_mutex_lock(lock, IS_ENABLED(CONFIG_SYS_CLOCK_EXISTS) ? sys_timepoint_timeout(deadline) : K_NO_WAIT) != 0)
+    {
+        return OS_ERR_OBJECT_IN_USE;
+    }
+
+    /* The record clears only under this lock, so it is now stable. If it is
+     * still set, the target is in its native wait or queued for this lock,
+     * and owns no provider lock. */
+    key = k_spin_lock(&OS_task_lock);
+    if (impl->state != OS_ZEPHYR_TASK_ACTIVE || impl->wait_lock != lock)
+    {
+        k_spin_unlock(&OS_task_lock, key);
+        k_mutex_unlock(lock);
+        return OS_ERR_OBJECT_IN_USE;
     }
     impl->state = OS_ZEPHYR_TASK_CLOSING;
     thread      = impl->thread;
+    release     = impl->wait_release;
+    arg         = impl->wait_arg;
     k_spin_unlock(&OS_task_lock, key);
+
+    /* Abort removes the target from any native wait queue. */
+    k_thread_abort(thread);
+    if (release != NULL)
+    {
+        release(arg);
+    }
+    k_mutex_unlock(lock);
+    return OS_SUCCESS;
+}
+
+int32 OS_TaskDelete_Impl(const OS_object_token_t *token)
+{
+    OS_impl_task_internal_record_t *impl = OS_OBJECT_TABLE_GET(OS_impl_task_table, *token);
+    k_timepoint_t                   deadline;
+    int32                           status;
+
+    OS_Zephyr_TaskEnter();
+    deadline = sys_timepoint_calc(K_MSEC(OS_ZEPHYR_TASK_DELETE_WAIT_MS));
+    status   = OS_Zephyr_TaskTryAbort(impl, token, deadline);
+
+    /* A target inside a provider operation soon blocks in an abortable wait
+     * or leaves the operation. Give it CPU time, but never wait unboundedly:
+     * failure restores the public ID. */
+    while (status == OS_ERR_OBJECT_IN_USE && IS_ENABLED(CONFIG_SYS_CLOCK_EXISTS) &&
+           !sys_timepoint_expired(deadline))
+    {
+        k_sleep(K_MSEC(1));
+        status = OS_Zephyr_TaskTryAbort(impl, token, deadline);
+    }
+    if (status != OS_SUCCESS)
+    {
+        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
+    }
 
     /* Closing and internal entry are serialized. No new internal resource
      * can be acquired. Application-owned resources remain the caller's
      * responsibility, as with native RTOS task deletion. After abort there
      * is no rollback: join and reclaim before shared finalization. */
-    k_thread_abort(thread);
     OS_Zephyr_TaskReclaim(impl);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }

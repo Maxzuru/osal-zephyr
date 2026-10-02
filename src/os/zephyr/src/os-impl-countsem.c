@@ -19,8 +19,8 @@ OS_impl_countsem_internal_record_t OS_impl_count_sem_table[OS_MAX_COUNT_SEMAPHOR
  * slot reuse before entering this provider. Keep each slot's kernel objects
  * for the lifetime of the port, and validate the full ID under its mutex
  * before accessing state, including after every wait. No reference or
- * waiter count is retained across a kernel wait. All operations are
- * thread-context APIs, including Give. */
+ * waiter count is retained across a kernel wait, so OS_TaskDelete may abort
+ * a waiter there. All operations are thread-context APIs, including Give. */
 static bool OS_Zephyr_CountSemMatches(const OS_impl_countsem_internal_record_t *impl,
                                     const OS_object_token_t *token)
 {
@@ -150,7 +150,9 @@ static int32 OS_Zephyr_CountSemTake(const OS_object_token_t *token, k_timepoint_
     return_code = OS_SUCCESS;
     while (impl->current_value == 0)
     {
+        OS_Zephyr_TaskWaitBegin(&impl->lock, NULL, NULL);
         status = k_condvar_wait(&impl->changed, &impl->lock, sys_timepoint_timeout(deadline));
+        OS_Zephyr_TaskWaitEnd();
         /* The permanent lock is reacquired even when the old object has
          * been deleted and this slot already belongs to another ID. */
         if (!OS_Zephyr_CountSemMatches(impl, token))

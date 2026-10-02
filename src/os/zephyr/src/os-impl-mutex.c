@@ -126,12 +126,18 @@ int32 OS_MutSemGive_Impl(const OS_object_token_t *token)
 int32 OS_MutSemTake_Impl(const OS_object_token_t *token)
 {
     OS_impl_mutex_internal_record_t *impl;
+    int                              status;
 
     OS_Zephyr_TaskEnter();
 
     impl = OS_OBJECT_TABLE_GET(OS_impl_mutex_table, *token);
 
-    if (k_mutex_lock(&impl->lock, K_FOREVER) != 0)
+    /* A waiter holds nothing until the native hand-off makes it the owner.
+     * OS_TaskDelete aborts it only while holding this mutex itself. */
+    OS_Zephyr_TaskWaitBegin(&impl->lock, NULL, NULL);
+    status = k_mutex_lock(&impl->lock, K_FOREVER);
+    OS_Zephyr_TaskWaitEnd();
+    if (status != 0)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }

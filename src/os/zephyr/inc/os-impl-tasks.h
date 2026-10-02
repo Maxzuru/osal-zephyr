@@ -48,6 +48,21 @@ static inline int32 OS_Zephyr_TaskLeaveResult(int32 status)
     return status;
 }
 
+struct k_mutex;
+
+/* Abortable provider waits. A guarded task blocked in a native wait holds no
+ * provider lock, so OS_TaskDelete may abort it there. Call WaitBegin right
+ * before the native wait and WaitEnd once it returns; WaitEnd must run while
+ * holding `lock`. The deleter trusts the record only after acquiring `lock`
+ * itself: Zephyr can hand a mutex to a waiter before the waiter runs, and
+ * holding `lock` excludes both that hand-off and a provider critical section.
+ * After the abort, release(arg) runs with `lock` held to undo reservations
+ * the waiter kept across the wait; it may be NULL. `lock` must stay valid for
+ * the life of the port. A wait inside an outer guard is never abortable,
+ * because the outer operation may hold other provider resources. */
+void OS_Zephyr_TaskWaitBegin(struct k_mutex *lock, void (*release)(void *arg), void *arg);
+void OS_Zephyr_TaskWaitEnd(void);
+
 /* Timebase helpers must unregister before terminating their native thread. */
 void OS_Zephyr_TaskUnregister(void);
 
