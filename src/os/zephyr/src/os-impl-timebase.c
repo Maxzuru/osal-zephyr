@@ -20,6 +20,7 @@ BUILD_ASSERT(CONFIG_CFS_OSAL_TIMEBASE_PRIORITY < CONFIG_NUM_PREEMPT_PRIORITIES);
 typedef struct
 {
     struct k_mutex    lock;
+    struct k_condvar  idle;
     struct k_sem      wake;
     struct k_sem      ready;
     struct k_timer    timer;
@@ -116,6 +117,7 @@ static uint32 OS_Zephyr_TimeBaseSync(osal_id_t id)
             elapsed = impl->external_sync(id);
             k_mutex_lock(&impl->lock, K_FOREVER);
             impl->external_busy = false;
+            k_condvar_broadcast(&impl->idle);
             key = k_spin_lock(&impl->ticks_lock);
             impl->pending += elapsed;
             k_spin_unlock(&impl->ticks_lock, key);
@@ -186,6 +188,7 @@ int32 OS_Zephyr_TimeBaseAPI_Impl_Init(void)
         if (!OS_timebases[i].initialized)
         {
             k_mutex_init(&OS_timebases[i].lock);
+            k_condvar_init(&OS_timebases[i].idle);
             k_sem_init(&OS_timebases[i].wake, 0, 1);
             k_sem_init(&OS_timebases[i].ready, 0, 1);
             k_timer_init(&OS_timebases[i].timer, OS_Zephyr_TimeBaseExpiry, NULL);
@@ -317,6 +320,8 @@ int32 OS_TimeBaseSet_Impl(const OS_object_token_t *token, uint32 start_time, uin
 int32 OS_TimeBaseDelete_Impl(const OS_object_token_t *token)
 {
     OS_Zephyr_timebase_t *impl = OS_OBJECT_TABLE_GET(OS_timebases, *token);
+    k_timepoint_t         deadline;
+
     OS_Zephyr_TaskEnter();
     /* Successful shared EXCLUSIVE admission excludes attached callbacks:
      * each owns a timebase reference. Wait for the short internal handoff
@@ -325,18 +330,26 @@ int32 OS_TimeBaseDelete_Impl(const OS_object_token_t *token)
     {
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (impl->external_busy)
-    {
-        /* Do not abort arbitrary BSP code or wait forever for its event. */
-        k_mutex_unlock(&impl->lock);
-        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
-    }
     if (k_timer_cleanup(&impl->timer) != 0)
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_TIMER_ERR_INTERNAL);
     }
+    /* Closing stops the helper from starting another external call. Wait a
+     * bounded time for a running one to return, but never abort BSP code.
+     * The helper reads closing only with external_busy clear, so a timeout
+     * can withdraw it before the helper has observed it. */
     impl->closing = true;
+    deadline = sys_timepoint_calc(K_MSEC(CONFIG_CFS_OSAL_TIMEBASE_DELETE_WAIT_MS));
+    while (impl->external_busy)
+    {
+        if (k_condvar_wait(&impl->idle, &impl->lock, sys_timepoint_timeout(deadline)) != 0 && impl->external_busy)
+        {
+            impl->closing = false;
+            k_mutex_unlock(&impl->lock);
+            return OS_Zephyr_TaskLeaveResult(OS_ERROR);
+        }
+    }
     k_sem_give(&impl->wake);
     k_mutex_unlock(&impl->lock);
     /* EXCLUSIVE has already reserved active_id. Internal sync wakes the

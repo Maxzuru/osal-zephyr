@@ -59,6 +59,16 @@ config CFS_OSAL_TIMEBASE_PRIORITY
 	  Select one of the two highest preemptible Zephyr priorities for
 	  timebase callback helpers. Lower numbers run first.
 
+config CFS_OSAL_TIMEBASE_DELETE_WAIT_MS
+	int "OSAL timebase delete wait for external sync (ms)"
+	default 1500
+	range 0 60000
+	help
+	  OS_TimeBaseDelete waits up to this long for a running external sync
+	  call to return. Set it above the longest external tick period.
+	  A call still running at the deadline is never aborted: deletion
+	  fails with OS_ERROR and the timebase keeps running.
+
 module = CFS_OSAL
 module-str = cfs_osal
 source "subsys/logging/Kconfig.template.log_config"
