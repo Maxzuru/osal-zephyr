@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <zephyr/kernel.h>
 
+#include "os-shared-clock.h"
 #include "os-shared-condvar.h"
 #include "os-shared-idmap.h"
 #include "os-impl-condvar.h"
@@ -238,21 +240,20 @@ int32 OS_CondVarBroadcast_Impl(const OS_object_token_t *token)
     return OS_Zephyr_TaskLeaveResult(OS_Zephyr_CondVarNotify(token, true));
 }
 
-int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
+/* Shared Wait/TimedWait helper, called inside the caller's task guard. */
+static int32 OS_Zephyr_CondVarWait(const OS_object_token_t *token, k_timeout_t timeout)
 {
     OS_impl_condvar_internal_record_t *impl = OS_OBJECT_TABLE_GET(OS_impl_condvar_table, *token);
     int32                             status;
 
-    OS_Zephyr_TaskEnter();
-
     if (k_mutex_lock(&impl->lock, K_NO_WAIT) != 0)
     {
-        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
+        return OS_ERROR;
     }
     if (k_mutex_lock(&impl->state_lock, K_FOREVER) != 0)
     {
         k_mutex_unlock(&impl->lock);
-        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
+        return OS_ERROR;
     }
     if (!OS_Zephyr_CondVarMatches(impl, token))
     {
@@ -277,10 +278,10 @@ int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
     k_mutex_unlock(&impl->lock); /* Drop only the probe before native Wait. */
     if (status != OS_SUCCESS)
     {
-        return OS_Zephyr_TaskLeaveResult(status);
+        return status;
     }
 
-    status = k_condvar_wait(&impl->changed, &impl->lock, K_FOREVER);
+    status = k_condvar_wait(&impl->changed, &impl->lock, timeout);
     OS_Zephyr_TaskWaitEnd();
 
     /* Native Wait reacquires the application mutex even on error. The
@@ -290,20 +291,78 @@ int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
     --impl->waiters;
     k_mutex_unlock(&impl->state_lock);
 
-    return OS_Zephyr_TaskLeaveResult(status == 0 ? OS_SUCCESS : OS_ERROR);
+    if (status == -EAGAIN)
+    {
+        return OS_ERROR_TIMEOUT;
+    }
+
+    return status == 0 ? OS_SUCCESS : OS_ERROR;
+}
+
+int32 OS_CondVarWait_Impl(const OS_object_token_t *token)
+{
+    OS_Zephyr_TaskEnter();
+
+    return OS_Zephyr_TaskLeaveResult(OS_Zephyr_CondVarWait(token, K_FOREVER));
+}
+
+/* OSAL deadlines are absolute OS_GetLocalTime() values. Fix the deadline as
+ * a relative kernel timeout when the wait starts, so a later
+ * OS_SetLocalTime() does not move it. Round up so the waiter never wakes
+ * before the deadline. */
+static int32 OS_Zephyr_CondVarTimeout(const OS_time_t *abs_wakeup_time, k_timeout_t *timeout)
+{
+    OS_time_t now;
+    uint64_t  remaining;
+    uint64_t  seconds;
+    uint64_t  ticks;
+    uint64_t  limit;
+    int32     status;
+
+    status = OS_GetLocalTime_Impl(&now);
+    if (status != OS_SUCCESS)
+    {
+        return status;
+    }
+    if (abs_wakeup_time->ticks <= now.ticks)
+    {
+        *timeout = K_NO_WAIT;
+        return OS_SUCCESS;
+    }
+
+    /* Unsigned subtraction is exact even where the signed one would overflow.
+     * Whole seconds are converted separately to keep intermediates small. */
+    remaining = (uint64_t)abs_wakeup_time->ticks - (uint64_t)now.ticks;
+    seconds   = remaining / OS_TIME_TICKS_PER_SECOND;
+    ticks     = k_ns_to_ticks_ceil64((remaining % OS_TIME_TICKS_PER_SECOND) * OS_TIME_TICK_RESOLUTION_NS);
+
+    /* Like other finite waits, refuse a timeout the kernel cannot represent
+     * rather than silently shortening it. */
+    limit = IS_ENABLED(CONFIG_TIMEOUT_64BIT) ? INT64_MAX : INT32_MAX;
+    if (seconds > (limit - ticks) / CONFIG_SYS_CLOCK_TICKS_PER_SEC)
+    {
+        return OS_ERR_NOT_IMPLEMENTED;
+    }
+
+    *timeout = K_TICKS(seconds * CONFIG_SYS_CLOCK_TICKS_PER_SEC + ticks);
+    return OS_SUCCESS;
 }
 
 int32 OS_CondVarTimedWait_Impl(const OS_object_token_t *token, const OS_time_t *abs_wakeup_time)
 {
+    k_timeout_t timeout;
+    int32       status;
+
     OS_Zephyr_TaskEnter();
 
-    ARG_UNUSED(token);
-    ARG_UNUSED(abs_wakeup_time);
+    /* Compute the timeout before taking any condvar lock. */
+    status = OS_Zephyr_CondVarTimeout(abs_wakeup_time, &timeout);
+    if (status == OS_SUCCESS)
+    {
+        status = OS_Zephyr_CondVarWait(token, timeout);
+    }
 
-    /* OSAL specifies an absolute OS_GetLocalTime() deadline. Zephyr's
-     * absolute kernel timeouts use uptime, and the clock-change notification
-     * protocol is not yet implemented. Preserve application ownership. */
-    return OS_Zephyr_TaskLeaveResult(OS_ERR_NOT_IMPLEMENTED);
+    return OS_Zephyr_TaskLeaveResult(status);
 }
 
 int32 OS_CondVarGetInfo_Impl(const OS_object_token_t *token, OS_condvar_prop_t *condvar_prop)
