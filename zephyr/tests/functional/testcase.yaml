@@ -40,10 +40,12 @@ tests:
   osal.functional.condvar:
     tags: condvar
     extra_args: OSAL_TEST=tests/condvar-test
-  # Needs queues (OS_QueueCreate); enable once queues are ported.
-  # osal.functional.idmap_api:
-  #   tags: idmap
-  #   extra_args: OSAL_TEST=tests/idmap-api-test
+  osal.functional.queue:
+    tags: queue
+    extra_args: OSAL_TEST=tests/queue-test
+  osal.functional.idmap_api:
+    tags: idmap
+    extra_args: OSAL_TEST=tests/idmap-api-test
   osal.functional.time_base_api:
     tags: timebase
     extra_args: OSAL_TEST=tests/time-base-api-test

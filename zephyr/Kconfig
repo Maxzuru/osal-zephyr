@@ -69,6 +69,16 @@ config CFS_OSAL_TIMEBASE_DELETE_WAIT_MS
 	  A call still running at the deadline is never aborted: deletion
 	  fails with OS_ERROR and the timebase keeps running.
 
+config CFS_OSAL_QUEUE_HEAP_SIZE
+	int "OSAL message queue heap size"
+	default 16384
+	range 1024 16777216
+	help
+	  Size of the dedicated heap that holds message queue storage.
+	  OS_QueueCreate allocates depth * (data_size + 4) bytes plus
+	  allocator overhead and fails with OS_ERROR when the heap is
+	  exhausted. OS_QueueDelete returns the storage.
+
 module = CFS_OSAL
 module-str = cfs_osal
 source "subsys/logging/Kconfig.template.log_config"

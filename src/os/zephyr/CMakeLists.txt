@@ -17,6 +17,7 @@ set(ZEPHYR_BASE_SRCLIST
     src/os-impl-errors.c
     src/os-impl-idmap.c
     src/os-impl-mutex.c
+    src/os-impl-queues.c
     src/os-impl-tasks.c
     src/os-impl-timebase.c
 )
@@ -32,7 +33,6 @@ list(APPEND ZEPHYR_IMPL_SRCLIST
     src/os-impl-no-files.c
     src/os-impl-no-filesys.c
     src/os-impl-no-heap.c
-    src/os-impl-no-queues.c
     ../portable/os-impl-no-loader.c
     ../portable/os-impl-no-network-gethostid.c
     ../portable/os-impl-no-network-gethostname.c
