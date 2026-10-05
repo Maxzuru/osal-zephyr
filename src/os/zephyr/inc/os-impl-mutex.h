@@ -10,13 +10,13 @@
 #include "common_types.h"
 #include <zephyr/kernel.h>
 
+#include "os-impl-slot.h"
+
 typedef struct
 {
-    struct k_mutex lock;
-    osal_id_t      object_id;
-    uint32         depth;
-    bool           initialized;
-    bool           active;
+    OS_Zephyr_slot_t slot;
+    struct k_mutex   lock;
+    uint32           depth;
 } OS_impl_mutex_internal_record_t;
 
 extern OS_impl_mutex_internal_record_t OS_impl_mutex_table[OS_MAX_MUTEXES];

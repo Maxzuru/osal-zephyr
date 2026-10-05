@@ -15,15 +15,10 @@
 
 OS_impl_condvar_internal_record_t OS_impl_condvar_table[OS_MAX_CONDVARS];
 
-/* Shared NONE tokens do not pin a slot. Keep all kernel objects permanent
- * and protect lifecycle state separately from the application mutex, so
- * Signal/Broadcast need not acquire application ownership. When both locks
- * are needed, take the application mutex before the state mutex. */
-static bool OS_Zephyr_CondVarMatches(const OS_impl_condvar_internal_record_t *impl,
-                                   const OS_object_token_t *token)
-{
-    return impl->active && OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token));
-}
+/* Slots follow os-impl-slot.h, with lifecycle state protected by
+ * state_lock rather than the application mutex, so Signal/Broadcast need
+ * not acquire application ownership. When both locks are needed, take the
+ * application mutex before the state mutex. */
 
 /* Called by OS_TaskDelete after aborting a waiter, with the application
  * mutex held, so state_lock follows the documented lock order. */
@@ -44,17 +39,12 @@ int32 OS_CondVarCreate_Impl(const OS_object_token_t *token, uint32 options)
 
     ARG_UNUSED(options);
 
-    /* Shared allocation serializes first initialization. Delayed calls may
-     * still use this storage after Delete, so subsequent Create must not
-     * reinitialize any of its kernel objects. */
-    if (!impl->initialized)
+    /* state_lock is unused until the slot is initialized, so it may be
+     * initialized again if SlotInit failed on an earlier attempt. */
+    if ((!impl->slot.initialized && k_mutex_init(&impl->state_lock) != 0) ||
+        !OS_Zephyr_SlotInit(&impl->slot, &impl->lock, &impl->changed))
     {
-        if (k_mutex_init(&impl->lock) != 0 || k_mutex_init(&impl->state_lock) != 0 ||
-            k_condvar_init(&impl->changed) != 0)
-        {
-            return OS_Zephyr_TaskLeaveResult(OS_ERROR);
-        }
-        impl->initialized = true;
+        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
 
     if (k_mutex_lock(&impl->lock, K_FOREVER) != 0)
@@ -66,17 +56,16 @@ int32 OS_CondVarCreate_Impl(const OS_object_token_t *token, uint32 options)
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (impl->active)
+    if (impl->slot.active)
     {
         k_mutex_unlock(&impl->state_lock);
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
 
-    impl->object_id = OS_ObjectIdFromToken(token);
-    impl->depth     = 0;
-    impl->waiters   = 0;
-    impl->active    = true;
+    impl->depth   = 0;
+    impl->waiters = 0;
+    OS_Zephyr_SlotActivate(&impl->slot, token);
     k_mutex_unlock(&impl->state_lock);
     k_mutex_unlock(&impl->lock);
 
@@ -101,7 +90,7 @@ int32 OS_CondVarDelete_Impl(const OS_object_token_t *token)
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (!OS_Zephyr_CondVarMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }
@@ -111,8 +100,8 @@ int32 OS_CondVarDelete_Impl(const OS_object_token_t *token)
     }
     else
     {
-        impl->active = false;
-        status       = OS_SUCCESS;
+        OS_Zephyr_SlotRetire(&impl->slot);
+        status = OS_SUCCESS;
     }
     k_mutex_unlock(&impl->state_lock);
     k_mutex_unlock(&impl->lock);
@@ -136,7 +125,7 @@ int32 OS_CondVarLock_Impl(const OS_object_token_t *token)
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (!OS_Zephyr_CondVarMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }
@@ -177,7 +166,7 @@ int32 OS_CondVarUnlock_Impl(const OS_object_token_t *token)
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (!OS_Zephyr_CondVarMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }
@@ -209,7 +198,7 @@ static int32 OS_Zephyr_CondVarNotify(const OS_object_token_t *token, bool broadc
     {
         return OS_ERROR;
     }
-    if (!OS_Zephyr_CondVarMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }
@@ -255,7 +244,7 @@ static int32 OS_Zephyr_CondVarWait(const OS_object_token_t *token, k_timeout_t t
         k_mutex_unlock(&impl->lock);
         return OS_ERROR;
     }
-    if (!OS_Zephyr_CondVarMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }

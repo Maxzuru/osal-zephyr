@@ -10,14 +10,14 @@
 #include "common_types.h"
 #include <zephyr/kernel.h>
 
+#include "os-impl-slot.h"
+
 typedef struct
 {
+    OS_Zephyr_slot_t slot;
     struct k_mutex   lock;
     struct k_condvar changed;
-    osal_id_t        object_id;
     uint32           current_value;
-    bool             initialized;
-    bool             active;
 } OS_impl_countsem_internal_record_t;
 
 extern OS_impl_countsem_internal_record_t OS_impl_count_sem_table[OS_MAX_COUNT_SEMAPHORES];

@@ -15,17 +15,9 @@
 
 OS_impl_countsem_internal_record_t OS_impl_count_sem_table[OS_MAX_COUNT_SEMAPHORES];
 
-/* NONE tokens do not pin a shared slot. A token can outlive deletion and
- * slot reuse before entering this provider. Keep each slot's kernel objects
- * for the lifetime of the port, and validate the full ID under its mutex
- * before accessing state, including after every wait. No reference or
- * waiter count is retained across a kernel wait, so OS_TaskDelete may abort
- * a waiter there. All operations are thread-context APIs, including Give. */
-static bool OS_Zephyr_CountSemMatches(const OS_impl_countsem_internal_record_t *impl,
-                                    const OS_object_token_t *token)
-{
-    return impl->active && OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token));
-}
+/* Slots follow os-impl-slot.h. No reference or waiter count is retained
+ * across a kernel wait, so OS_TaskDelete may abort a waiter there. All
+ * operations are thread-context APIs, including Give. */
 
 int32 OS_CountSemCreate_Impl(const OS_object_token_t *token, uint32 sem_initial_value, uint32 options)
 {
@@ -42,28 +34,21 @@ int32 OS_CountSemCreate_Impl(const OS_object_token_t *token, uint32 sem_initial_
         return OS_Zephyr_TaskLeaveResult(OS_INVALID_SEM_VALUE);
     }
 
-    /* Shared allocation serializes the first initialization of a slot.
-     * Later creations must not reinitialize locks that old calls may use. */
-    if (!impl->initialized)
+    if (!OS_Zephyr_SlotInit(&impl->slot, &impl->lock, &impl->changed))
     {
-        if (k_mutex_init(&impl->lock) != 0 || k_condvar_init(&impl->changed) != 0)
-        {
-            return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
-        }
-        impl->initialized = true;
+        return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
     if (k_mutex_lock(&impl->lock, K_FOREVER) != 0)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    if (impl->active)
+    if (impl->slot.active)
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    impl->object_id     = OS_ObjectIdFromToken(token);
     impl->current_value = sem_initial_value;
-    impl->active        = true;
+    OS_Zephyr_SlotActivate(&impl->slot, token);
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
 }
@@ -81,13 +66,13 @@ int32 OS_CountSemDelete_Impl(const OS_object_token_t *token)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    if (!OS_Zephyr_CountSemMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERR_INVALID_ID);
     }
 
-    impl->active = false;
+    OS_Zephyr_SlotRetire(&impl->slot);
     k_condvar_broadcast(&impl->changed);
     k_mutex_unlock(&impl->lock);
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
@@ -104,7 +89,7 @@ int32 OS_CountSemGive_Impl(const OS_object_token_t *token)
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    if (!OS_Zephyr_CountSemMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         status = OS_ERR_INVALID_ID;
     }
@@ -141,7 +126,7 @@ static int32 OS_Zephyr_CountSemTake(const OS_object_token_t *token, k_timepoint_
     {
         return status == -EAGAIN || status == -EBUSY ? OS_SEM_TIMEOUT : OS_SEM_FAILURE;
     }
-    if (!OS_Zephyr_CountSemMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         k_mutex_unlock(&impl->lock);
         return OS_ERR_INVALID_ID;
@@ -155,7 +140,7 @@ static int32 OS_Zephyr_CountSemTake(const OS_object_token_t *token, k_timepoint_
         OS_Zephyr_TaskWaitEnd();
         /* The permanent lock is reacquired even when the old object has
          * been deleted and this slot already belongs to another ID. */
-        if (!OS_Zephyr_CountSemMatches(impl, token))
+        if (!OS_Zephyr_SlotMatches(&impl->slot, token))
         {
             return_code = OS_ERR_INVALID_ID;
             break;
@@ -212,7 +197,7 @@ int32 OS_CountSemGetInfo_Impl(const OS_object_token_t *token, OS_count_sem_prop_
     {
         return OS_Zephyr_TaskLeaveResult(OS_SEM_FAILURE);
     }
-    if (!OS_Zephyr_CountSemMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERR_INVALID_ID);

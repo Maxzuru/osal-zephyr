@@ -18,12 +18,8 @@ OS_impl_queue_internal_record_t OS_impl_queue_table[OS_MAX_QUEUES];
 
 K_HEAP_DEFINE(OS_queue_heap, CONFIG_CFS_OSAL_QUEUE_HEAP_SIZE);
 
-/* Get and Put use unpinned shared tokens, see os-impl-countsem.c. The
- * storage is only touched under the slot mutex after the full ID matches. */
-static bool OS_Zephyr_QueueMatches(const OS_impl_queue_internal_record_t *impl, const OS_object_token_t *token)
-{
-    return impl->active && OS_ObjectIdEqual(impl->object_id, OS_ObjectIdFromToken(token));
-}
+/* Get and Put use unpinned shared tokens, see os-impl-slot.h. The storage
+ * is only touched under the slot mutex after the full ID matches. */
 
 /* Runs with the slot mutex held after OS_TaskDelete aborts a reader. The
  * reader may already have been signaled, so pass that wakeup on. */
@@ -31,7 +27,7 @@ static void OS_Zephyr_QueueWaitAborted(void *arg)
 {
     OS_impl_queue_internal_record_t *impl = arg;
 
-    if (impl->active && impl->count != 0)
+    if (impl->slot.active && impl->count != 0)
     {
         k_condvar_signal(&impl->changed);
     }
@@ -49,13 +45,9 @@ int32 OS_QueueCreate_Impl(const OS_object_token_t *token, uint32 flags)
 
     ARG_UNUSED(flags);
 
-    if (!impl->initialized)
+    if (!OS_Zephyr_SlotInit(&impl->slot, &impl->lock, &impl->changed))
     {
-        if (k_mutex_init(&impl->lock) != 0 || k_condvar_init(&impl->changed) != 0)
-        {
-            return OS_Zephyr_TaskLeaveResult(OS_ERROR);
-        }
-        impl->initialized = true;
+        return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
 
     if (depth == 0 || size > SIZE_MAX / depth - sizeof(uint32))
@@ -74,21 +66,20 @@ int32 OS_QueueCreate_Impl(const OS_object_token_t *token, uint32 flags)
         k_heap_free(&OS_queue_heap, storage);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (impl->active)
+    if (impl->slot.active)
     {
         k_mutex_unlock(&impl->lock);
         k_heap_free(&OS_queue_heap, storage);
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
 
-    impl->object_id = OS_ObjectIdFromToken(token);
     impl->max_size  = size;
     impl->max_depth = depth;
     impl->head      = 0;
     impl->count     = 0;
     impl->lengths   = storage;
     impl->data      = (uint8 *)&storage[depth];
-    impl->active    = true;
+    OS_Zephyr_SlotActivate(&impl->slot, token);
     k_mutex_unlock(&impl->lock);
 
     return OS_Zephyr_TaskLeaveResult(OS_SUCCESS);
@@ -104,13 +95,13 @@ int32 OS_QueueDelete_Impl(const OS_object_token_t *token)
     {
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
-    if (!OS_Zephyr_QueueMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         k_mutex_unlock(&impl->lock);
         return OS_Zephyr_TaskLeaveResult(OS_ERR_INVALID_ID);
     }
 
-    impl->active = false;
+    OS_Zephyr_SlotRetire(&impl->slot);
     k_condvar_broadcast(&impl->changed);
     k_heap_free(&OS_queue_heap, impl->lengths);
     impl->lengths = NULL;
@@ -147,7 +138,7 @@ int32 OS_QueueGet_Impl(const OS_object_token_t *token, void *data, size_t size, 
     }
 
     return_code = OS_SUCCESS;
-    if (!OS_Zephyr_QueueMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         return_code = OS_ERR_INVALID_ID;
     }
@@ -169,7 +160,7 @@ int32 OS_QueueGet_Impl(const OS_object_token_t *token, void *data, size_t size, 
             status = k_condvar_wait(&impl->changed, &impl->lock, sys_timepoint_timeout(deadline));
             OS_Zephyr_TaskWaitEnd();
 
-            if (!OS_Zephyr_QueueMatches(impl, token))
+            if (!OS_Zephyr_SlotMatches(&impl->slot, token))
             {
                 return_code = OS_ERR_INVALID_ID;
                 break;
@@ -213,7 +204,7 @@ int32 OS_QueuePut_Impl(const OS_object_token_t *token, const void *data, size_t 
         return OS_Zephyr_TaskLeaveResult(OS_ERROR);
     }
 
-    if (!OS_Zephyr_QueueMatches(impl, token))
+    if (!OS_Zephyr_SlotMatches(&impl->slot, token))
     {
         return_code = OS_ERR_INVALID_ID;
     }

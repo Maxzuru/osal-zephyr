@@ -10,13 +10,13 @@
 #include "common_types.h"
 #include <zephyr/kernel.h>
 
+#include "os-impl-slot.h"
+
 typedef struct
 {
+    OS_Zephyr_slot_t  slot;
     struct k_mutex    lock;
     struct k_condvar  changed;
-    osal_id_t         object_id;
-    bool              initialized;
-    bool              active;
     size_t            max_size;
     osal_blockcount_t max_depth;
     osal_blockcount_t head;
