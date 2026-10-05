@@ -1,0 +1,24 @@
+/*
+ * Copyright (c) 2026 Space Cubics
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* The storage partition holds only four erase blocks, too few for littlefs.
+ * The tests boot no second image, so its slot holds the file system. */
+/ {
+	fstab {
+		compatible = "zephyr,fstab";
+
+		lfs: lfs {
+			compatible = "zephyr,fstab,littlefs";
+			mount-point = "/lfs";
+			partition = <&slot1_partition>;
+			automount;
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+		};
+	};
+};

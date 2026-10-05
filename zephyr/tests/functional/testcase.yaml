@@ -55,3 +55,23 @@ tests:
   osal.functional.timer_add_api:
     tags: timer
     extra_args: OSAL_TEST=tests/timer-add-api-test
+  osal.functional.file_api:
+    tags: file
+    extra_args:
+      - OSAL_TEST=tests/file-api-test
+      - EXTRA_CONF_FILE=fs.conf
+  osal.functional.file_sys_add_fixed_map_api:
+    tags: file
+    extra_args:
+      - OSAL_TEST=tests/file-sys-add-fixed-map-api-test
+      - EXTRA_CONF_FILE=fs.conf
+  osal.functional.osfile:
+    tags: file
+    extra_args:
+      - OSAL_TEST=unit-tests/osfile-test
+      - EXTRA_CONF_FILE=fs.conf
+  osal.functional.osfilesys:
+    tags: file
+    extra_args:
+      - OSAL_TEST=unit-tests/osfilesys-test
+      - EXTRA_CONF_FILE=fs.conf

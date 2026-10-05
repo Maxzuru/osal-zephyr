@@ -10,6 +10,7 @@ config CFS_OSAL
 	depends on PREEMPT_ENABLED
 	depends on NUM_METAIRQ_PRIORITIES <= NUM_COOP_PRIORITIES
 	select PRINTK
+	select FILE_SYSTEM
 	help
 	  This option enables the Core Flight System (cFS) Operating System Abstraction Layer (OSAL).
 
@@ -78,6 +79,18 @@ config CFS_OSAL_QUEUE_HEAP_SIZE
 	  OS_QueueCreate allocates depth * (data_size + 4) bytes plus
 	  allocator overhead and fails with OS_ERROR when the heap is
 	  exhausted. OS_QueueDelete returns the storage.
+
+config CFS_OSAL_FILESYS_ROOT
+	string "Directory holding OSAL volumes"
+	default ""
+	help
+	  Absolute Zephyr path, inside a file system mounted before OSAL
+	  starts, that holds a directory per OS_mkfs and OS_initfs volume.
+	  Relative OS_FileSysAddFixedMap paths resolve against it. Leave it
+	  empty to allow only fixed maps to absolute paths. Formatting a
+	  volume removes the contents of its directory. Volumes on a
+	  RAM-backed file system are volatile. The Zephyr file system must
+	  allow as many open files and directories as OSAL uses.
 
 module = CFS_OSAL
 module-str = cfs_osal
