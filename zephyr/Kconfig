@@ -9,8 +9,8 @@ config CFS_OSAL
 	depends on SYS_CLOCK_EXISTS
 	depends on PREEMPT_ENABLED
 	depends on NUM_METAIRQ_PRIORITIES <= NUM_COOP_PRIORITIES
+	depends on FILE_SYSTEM
 	select PRINTK
-	select FILE_SYSTEM
 	help
 	  This option enables the Core Flight System (cFS) Operating System Abstraction Layer (OSAL).
 
