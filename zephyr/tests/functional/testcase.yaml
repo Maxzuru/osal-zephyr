@@ -75,3 +75,15 @@ tests:
     extra_args:
       - OSAL_TEST=unit-tests/osfilesys-test
       - EXTRA_CONF_FILE=fs.conf
+  # network-api-test is not listed: its shutdown passes need TCP half-close,
+  # which the native stack lacks, and a connection the client closes before
+  # the server accepts it, which the native stack discards.
+  osal.functional.select:
+    tags: network
+    extra_args:
+      - OSAL_TEST=tests/select-test
+      - EXTRA_CONF_FILE=net.conf
+    # The tests use only loopback. Drop QEMU's default SLIP link, which
+    # needs tunslip6 running on the host.
+    extra_configs:
+      - platform:qemu_x86/atom:CONFIG_NET_SLIP_TAP=n

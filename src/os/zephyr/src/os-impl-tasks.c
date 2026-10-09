@@ -15,6 +15,11 @@
  * operation to block in an abortable wait or leave the operation. */
 #define OS_ZEPHYR_TASK_DELETE_WAIT_MS 100
 
+#ifdef CONFIG_CFS_OSAL_NETWORK_WAIT_SLICE_MS
+/* A sliced waiter offers deletion only between slices. */
+BUILD_ASSERT(CONFIG_CFS_OSAL_NETWORK_WAIT_SLICE_MS * 2 <= OS_ZEPHYR_TASK_DELETE_WAIT_MS);
+#endif
+
 typedef enum
 {
     OS_ZEPHYR_TASK_FREE,
@@ -40,6 +45,8 @@ typedef struct
     struct k_mutex         *wait_lock;
     void                  (*wait_release)(void *arg);
     void                   *wait_arg;
+    /* Outlives every native thread generation, see OS_Zephyr_TaskSliceBegin(). */
+    struct k_mutex          slice_lock;
 } OS_impl_task_internal_record_t;
 
 typedef struct
@@ -144,6 +151,50 @@ void OS_Zephyr_TaskWaitEnd(void)
     k_spin_unlock(&OS_task_lock, key);
 }
 
+struct k_mutex *OS_Zephyr_TaskSliceBegin(void (*release)(void *arg), void *arg)
+{
+    OS_impl_task_internal_record_t *impl;
+    struct k_mutex                 *lock = NULL;
+    k_spinlock_key_t                key;
+
+    key  = k_spin_lock(&OS_task_lock);
+    impl = OS_Zephyr_TaskFind(k_current_get());
+    if (impl != NULL && impl->internal_depth == 1)
+    {
+        lock = &impl->slice_lock;
+    }
+    k_spin_unlock(&OS_task_lock, key);
+
+    if (lock != NULL)
+    {
+        /* The record is still clear, so a deleter that holds the lock now
+         * releases it without aborting. */
+        (void)k_mutex_lock(lock, K_FOREVER);
+        OS_Zephyr_TaskWaitBegin(lock, release, arg);
+    }
+    return lock;
+}
+
+void OS_Zephyr_TaskSlicePause(struct k_mutex *lock)
+{
+    if (lock != NULL)
+    {
+        /* Unlocking hands the lock to a queued deleter, which then finds the
+         * record set and aborts this thread while it queues to relock. */
+        k_mutex_unlock(lock);
+        (void)k_mutex_lock(lock, K_FOREVER);
+    }
+}
+
+void OS_Zephyr_TaskSliceEnd(struct k_mutex *lock)
+{
+    if (lock != NULL)
+    {
+        OS_Zephyr_TaskWaitEnd();
+        k_mutex_unlock(lock);
+    }
+}
+
 /* Join is the safety condition: stack-free's live-thread check does not
  * recognize the reserved MPU guard prefix on all Zephyr architectures. */
 static void OS_Zephyr_TaskReclaim(OS_impl_task_internal_record_t *impl)
@@ -204,6 +255,7 @@ int32 OS_Zephyr_TaskAPI_Impl_Init(void)
         for (i = 0; i < OS_MAX_TASKS; ++i)
         {
             k_sem_init(&OS_impl_task_table[i].reusable, 1, 1);
+            k_mutex_init(&OS_impl_task_table[i].slice_lock);
         }
         OS_task_initialized = true;
     }

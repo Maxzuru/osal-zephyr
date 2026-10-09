@@ -92,6 +92,31 @@ config CFS_OSAL_FILESYS_ROOT
 	  RAM-backed file system are volatile. The Zephyr file system must
 	  allow as many open files and directories as OSAL uses.
 
+config CFS_OSAL_NETWORK
+	bool "OSAL sockets, select and host name"
+	default y
+	depends on NET_SOCKETS
+	help
+	  Implement the OSAL socket, select and host name APIs with Zephyr
+	  sockets. The address families follow NET_IPV4 and NET_IPV6, and
+	  addresses convert from numeric strings only. Every OSAL socket uses
+	  a Zephyr file descriptor and network context; see ZVFS_OPEN_MAX and
+	  NET_MAX_CONTEXTS. OS_SelectMultiple polls at most ZVFS_POLL_MAX
+	  sockets. The IP_DSCP option needs NET_CONTEXT_DSCP_ECN. The native
+	  TCP stack cannot shut down sending, so OS_SocketShutdown supports
+	  only OS_SocketShutdownMode_SHUT_READ there.
+
+config CFS_OSAL_NETWORK_WAIT_SLICE_MS
+	int "OSAL socket wait slice (ms)"
+	default 10
+	range 1 50
+	depends on CFS_OSAL_NETWORK
+	help
+	  Blocking socket calls and selects wait in slices of at most this
+	  length. OS_TaskDelete can delete a task blocked in one only between
+	  slices, so deletion may wait up to one slice. Each blocked task
+	  wakes once per slice.
+
 module = CFS_OSAL
 module-str = cfs_osal
 source "subsys/logging/Kconfig.template.log_config"

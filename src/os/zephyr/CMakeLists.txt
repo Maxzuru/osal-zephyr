@@ -29,17 +29,30 @@ set(ZEPHYR_IMPL_SRCLIST
     ../portable/os-impl-console-bsp.c
 )
 
+# Sockets, select and host name. Zephyr has no host ID, as on RTEMS.
+if(CONFIG_CFS_OSAL_NETWORK)
+  list(APPEND ZEPHYR_IMPL_SRCLIST
+      src/os-impl-network.c
+      src/os-impl-select.c
+      src/os-impl-sockets.c
+      ../portable/os-impl-no-network-gethostid.c
+  )
+else()
+  list(APPEND ZEPHYR_IMPL_SRCLIST
+      ../portable/os-impl-no-network-gethostid.c
+      ../portable/os-impl-no-network-gethostname.c
+      ../portable/os-impl-no-select.c
+      ../portable/os-impl-no-sockets.c
+  )
+endif()
+
 # Areas not yet ported to Zephyr. Every call reports OS_ERR_NOT_IMPLEMENTED
 # so the full OSAL links; replace each entry when its area is implemented.
 list(APPEND ZEPHYR_IMPL_SRCLIST
     src/os-impl-no-heap.c
     ../portable/os-impl-no-loader.c
-    ../portable/os-impl-no-network-gethostid.c
-    ../portable/os-impl-no-network-gethostname.c
     ../portable/os-impl-no-rwlock.c
-    ../portable/os-impl-no-select.c
     ../portable/os-impl-no-shell.c
-    ../portable/os-impl-no-sockets.c
     ../portable/os-impl-no-symtab.c
 )
 

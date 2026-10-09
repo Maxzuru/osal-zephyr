@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 
 #include "os-impl-files.h"
+#include "os-impl-sockets.h"
 #include "os-impl-tasks.h"
 #include "os-shared-file.h"
 #include "os-shared-idmap.h"
@@ -133,6 +134,7 @@ int32 OS_FileOpen_Impl(const OS_object_token_t *token, const char *local_path, i
      * previous close left it unlocked. */
     k_mutex_init(&impl->lock);
     fs_file_t_init(&impl->file);
+    impl->is_socket = false;
 
     rc = fs_open(&impl->file, local_path, mode);
 
@@ -141,7 +143,14 @@ int32 OS_FileOpen_Impl(const OS_object_token_t *token, const char *local_path, i
 
 int32 OS_GenericClose_Impl(const OS_object_token_t *token)
 {
-    OS_impl_file_internal_record_t *impl = OS_Zephyr_FileLock(token);
+    OS_impl_file_internal_record_t *impl;
+
+    if (OS_Zephyr_IsSocket(token))
+    {
+        return OS_Zephyr_SocketClose(token);
+    }
+
+    impl = OS_Zephyr_FileLock(token);
 
     /* Backends release the handle even when the final flush fails, but the
      * VFS then still marks it open; retrying would release it twice. As with
@@ -174,6 +183,12 @@ int32 OS_GenericSeek_Impl(const OS_object_token_t *token, osal_offset_t offset, 
             return OS_ERROR;
     }
 
+    /* As lseek() on POSIX sockets fails with ESPIPE. */
+    if (OS_Zephyr_IsSocket(token))
+    {
+        return OS_ERR_OPERATION_NOT_SUPPORTED;
+    }
+
     impl = OS_Zephyr_FileLock(token);
 
     if (fs_seek(&impl->file, (off_t)offset, where) != 0)
@@ -199,11 +214,13 @@ int32 OS_GenericRead_Impl(const OS_object_token_t *token, void *buffer, size_t n
     OS_impl_file_internal_record_t *impl;
     ssize_t                         count;
 
-    ARG_UNUSED(abs_timeout);
-
     if (nbytes == 0)
     {
         return OS_SUCCESS;
+    }
+    if (OS_Zephyr_IsSocket(token))
+    {
+        return OS_Zephyr_SocketRead(token, buffer, nbytes, abs_timeout);
     }
 
     impl = OS_Zephyr_FileLock(token);
@@ -221,11 +238,13 @@ int32 OS_GenericWrite_Impl(const OS_object_token_t *token, const void *buffer, s
     OS_impl_file_internal_record_t *impl;
     ssize_t                         count;
 
-    ARG_UNUSED(abs_timeout);
-
     if (nbytes == 0)
     {
         return OS_SUCCESS;
+    }
+    if (OS_Zephyr_IsSocket(token))
+    {
+        return OS_Zephyr_SocketWrite(token, buffer, nbytes, abs_timeout);
     }
 
     impl = OS_Zephyr_FileLock(token);
@@ -244,7 +263,7 @@ int32 OS_FileTruncate_Impl(const OS_object_token_t *token, osal_offset_t len)
     int                             rc;
     int32                           status;
 
-    if (len < 0)
+    if (len < 0 || OS_Zephyr_IsSocket(token))
     {
         return OS_ERROR;
     }
@@ -281,7 +300,7 @@ int32 OS_FileAllocate_Impl(const OS_object_token_t *token, osal_offset_t offset,
     int                             rc;
     int32                           status;
 
-    if (offset < 0 || len < 0)
+    if (offset < 0 || len < 0 || OS_Zephyr_IsSocket(token))
     {
         return OS_ERROR;
     }

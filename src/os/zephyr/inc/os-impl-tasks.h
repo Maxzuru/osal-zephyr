@@ -63,6 +63,24 @@ struct k_mutex;
 void OS_Zephyr_TaskWaitBegin(struct k_mutex *lock, void (*release)(void *arg), void *arg);
 void OS_Zephyr_TaskWaitEnd(void);
 
+/* Sliced provider waits, for native waits that are unsafe to abort: k_poll()
+ * leaves its event registrations behind when its waiter is aborted. The
+ * waiter instead repeats bounded native waits while holding its task's slice
+ * lock and calls Pause between them, where it holds no provider lock and a
+ * pending OS_TaskDelete may abort it. Pass the result of Begin to Pause and
+ * End. Begin returns NULL, and the waits are then not abortable, for threads
+ * not created by OSAL and inside an outer guard. After an abort, release(arg)
+ * runs as for OS_Zephyr_TaskWaitBegin(); it may be NULL. Keep each native
+ * wait well below the time OS_TaskDelete waits for its target.
+ *
+ * TODO: Wake sliced waiters with an extra per-task descriptor instead, such
+ * as a zvfs eventfd that every poll set includes and OS_TaskDelete signals.
+ * Waits could then block for their whole timeout, and deletion would not wait
+ * for the current slice to end, at the cost of one descriptor per task. */
+struct k_mutex *OS_Zephyr_TaskSliceBegin(void (*release)(void *arg), void *arg);
+void            OS_Zephyr_TaskSlicePause(struct k_mutex *lock);
+void            OS_Zephyr_TaskSliceEnd(struct k_mutex *lock);
+
 /* Timebase helpers must unregister before terminating their native thread. */
 void OS_Zephyr_TaskUnregister(void);
 
